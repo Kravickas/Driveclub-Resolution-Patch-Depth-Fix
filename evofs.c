@@ -990,15 +990,16 @@ int ndx_verify_hashes(const Index *x)
 
 /* ---------------------------------------------------------------- .rpk */
 
-static const uint8_t PACK_MAGIC[30] =
+static const char PACK_MAGIC[] =
     "EVOSLITL\x12\x00\x00\x00Resource PacK file";
+#define PACK_MAGIC_LEN (sizeof PACK_MAGIC - 1)
 
 static int rpk_parse_inner(Pack *pk, const uint8_t *buf, size_t len)
 {
     size_t p;
     uint32_t i, npool, apool, total_deps = 0;
     memset(pk, 0, sizeof *pk);
-    if (len < 0x2A || memcmp(buf, PACK_MAGIC, 30)) return evo_fail("not a resource pack");
+    if (len < 0x2A || memcmp(buf, PACK_MAGIC, PACK_MAGIC_LEN)) return evo_fail("not a resource pack");
     pk->toc_size = rd32(buf + 0x1E);
     pk->toc_offset = rd32(buf + 0x22);
     if (pk->toc_offset != 0x26) return evo_fail("unexpected tocOffset 0x%X", pk->toc_offset);
@@ -1116,7 +1117,7 @@ int evo_find_packs(const uint8_t *buf, size_t len, size_t *out, int max)
     if (len < 30) return 0;
     for (i = 0; i + 30 <= len && n < max; i++) {
         Pack pk;
-        if (memcmp(buf + i, PACK_MAGIC, 30)) continue;
+        if (memcmp(buf + i, PACK_MAGIC, PACK_MAGIC_LEN)) continue;
         if (rpk_parse(&pk, buf + i, len - i) == 0) { out[n++] = i; rpk_free(&pk); }
         else rpk_free(&pk);
     }
@@ -1143,7 +1144,7 @@ int dat_scan_packs(DatReader *r, uint64_t *out, int max)
         len = prevn + r->buffer_size;
         base = (uint64_t)i * r->buffer_size - prevn;
         for (j = 0; j + 30 <= len && n < max; j++)
-            if (!memcmp(win + j, PACK_MAGIC, 30)) out[n++] = base + j;
+            if (!memcmp(win + j, PACK_MAGIC, PACK_MAGIC_LEN)) out[n++] = base + j;
         prevn = len >= TAIL ? TAIL : len;
         memcpy(prev, win + len - prevn, prevn);
     }
@@ -1222,6 +1223,6 @@ int evo_sniff(const char *path)
     fclose(f);
     if (n >= 4 && !memcmp(h, "DATF", 4)) return EVO_DAT;
     if (n >= 4 && (!memcmp(h, "DATN", 4) || !memcmp(h, "DATX", 4))) return EVO_NDX;
-    if (n >= 30 && !memcmp(h, PACK_MAGIC, 30)) return EVO_RPK;
+    if (n >= (int)PACK_MAGIC_LEN && !memcmp(h, PACK_MAGIC, PACK_MAGIC_LEN)) return EVO_RPK;
     return EVO_UNKNOWN;
 }
