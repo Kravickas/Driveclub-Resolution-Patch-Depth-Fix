@@ -54,7 +54,10 @@ jobs:
         run: |
           set -e
           mkdir -p empty
-          "./DC Res Patch Depth Fix (console).exe" empty | tee out.txt
+          # it exits 1 when there was nothing to do, which is right, so the
+          # answer is read from what it printed rather than from the code
+          "./DC Res Patch Depth Fix (console).exe" empty > out.txt 2>&1 || true
+          cat out.txt
           grep -q "NOTHING TO PATCH" out.txt
 
       - name: package
@@ -96,7 +99,8 @@ jobs:
         run: |
           set -e
           mkdir -p empty
-          ./DC-Res-Patch-Depth-Fix-terminal empty | tee out.txt
+          ./DC-Res-Patch-Depth-Fix-terminal empty > out.txt 2>&1 || true
+          cat out.txt
           grep -q "NOTHING TO PATCH" out.txt
 
       - name: the window opens
@@ -152,7 +156,8 @@ jobs:
         run: |
           set -e
           mkdir -p empty
-          ./DC-Res-Patch-Depth-Fix-terminal empty | tee out.txt
+          ./DC-Res-Patch-Depth-Fix-terminal empty > out.txt 2>&1 || true
+          cat out.txt
           grep -q "NOTHING TO PATCH" out.txt
 
       - name: package
