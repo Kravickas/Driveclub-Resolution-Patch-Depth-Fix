@@ -152,7 +152,7 @@ jobs:
           pkill -f DC-Res-Patch-Depth-Fix || true
 
       - name: Run AppImage packaging script
-        run: ./.github/workflows/scripts/linux-appimage.sh
+        run: bash ./.github/workflows/scripts/linux-appimage.sh
 
       - name: Package and Upload Linux artifact
         run: |
