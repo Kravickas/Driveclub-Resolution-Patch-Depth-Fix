@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Name=DC Res Patch Depth Fix
+Comment=Makes DriveClub test depth against the real resolution
+Exec=DC-Res-Patch-Depth-Fix
+Icon=dc-res-patch-depth-fix
+Terminal=false
+Categories=Utility;Game;
