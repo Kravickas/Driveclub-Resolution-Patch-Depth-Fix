@@ -56,26 +56,44 @@ uint8_t *slurp_pub(const char *path, size_t *len)
 
 static const char *OWNER = "msaadepthconversion";
 
-static int owned_by_depth_pass(const Pack *pk, const uint8_t *buf, size_t len, uint32_t which)
+/* Which resources the depth pass owns.
+ *
+ * Gathered once for the whole pack rather than asked again for every candidate:
+ * a pack holds thousands of resources, and asking each time meant walking all
+ * of them each time. */
+#define OWNED_MAX 64
+static uint64_t g_owned[OWNED_MAX];
+static int g_nowned;
+
+static void collect_owned(const Pack *pk, const uint8_t *buf, size_t len)
 {
     uint32_t j;
-    for (j = 0; j < pk->count; j++) {
+    g_nowned = 0;
+    for (j = 0; j < pk->count && g_nowned < OWNED_MAX; j++) {
         size_t q = pk->res[j].rec + 8;
         uint16_t nd, k;
         char tmp[256];
-        const char *nm;
+        const char *nm = rpk_name(pk, buf, j, tmp);
+        if (!nm || !strstr(nm, OWNER)) continue;
         if (q + 2 > len) continue;
         nd = (uint16_t)(buf[q] | (buf[q + 1] << 8));
-        for (k = 0; k < nd && q + 2 + (size_t)(k + 1) * 8 <= len; k++) {
+        for (k = 0; k < nd && g_nowned < OWNED_MAX &&
+                    q + 2 + (size_t)(k + 1) * 8 <= len; k++) {
             uint64_t dep = 0;
             size_t b;
             for (b = 0; b < 8; b++)
                 dep |= (uint64_t)buf[q + 2 + (size_t)k * 8 + b] << (b * 8);
-            if (dep != pk->res[which].uid) continue;
-            nm = rpk_name(pk, buf, j, tmp);
-            if (nm && strstr(nm, OWNER)) return 1;
+            g_owned[g_nowned++] = dep;
         }
     }
+}
+
+static int owned_by_depth_pass(const Pack *pk, const uint8_t *buf, size_t len, uint32_t which)
+{
+    int j;
+    (void)buf; (void)len;
+    for (j = 0; j < g_nowned; j++)
+        if (g_owned[j] == pk->res[which].uid) return 1;
     return 0;
 }
 
@@ -86,6 +104,7 @@ static int fix_pack(uint8_t *buf, size_t len)
     int done = 0;
 
     if (rpk_parse(&pk, buf, len) != 0) return -1;
+    collect_owned(&pk, buf, len);
     for (i = 0; i < pk.count; i++) {
         uint8_t *p;
         size_t o, sz;
@@ -235,28 +254,100 @@ static int patch_loose(const char *path)
     return n;
 }
 
-static int patch_in_dat(const char *dat, uint64_t at, uint32_t size)
+/* A packed game keeps its resources compressed inside the archives, so a pack
+ * cannot be changed where it lies: the new bytes would have to be squeezed
+ * again and would no longer be the size the index promises.
+ *
+ * The game reads a loose file before it looks in an archive, so the pack is
+ * taken out, changed, and written beside the archives under its own name. That
+ * is what a mod does, and it is undone by deleting the file. */
+static int rebuild_dat(const char *dat_path, const char *ndx_path,
+                       Index *x, uint32_t which, uint8_t *pack, uint32_t size);
+
+static int patch_in_dat(const char *dat, uint64_t at, uint32_t size,
+                        const char *ndx_path, Index *x, uint32_t which)
 {
-    FILE *f = fopen(dat, "r+b");
+    DatReader r;
     uint8_t *buf;
     int n;
-    if (!f) return 0;
-    buf = (uint8_t *)malloc(size);
-    if (!buf) { fclose(f); return 0; }
-    if (FSEEK(f, (int64_t)at, SEEK_SET) != 0 || fread(buf, 1, size, f) != size) {
-        free(buf); fclose(f); return 0;
-    }
-    if (!could_hold_it(buf, size)) { free(buf); fclose(f); return 0; }
+
+    if (dat_open(&r, dat) != 0) return 0;
+    buf = (uint8_t *)malloc(size ? size : 1);
+    if (!buf) { dat_close(&r); return 0; }
+    if (dat_read(&r, at, size, buf) != 0) { free(buf); dat_close(&r); return 0; }
+    dat_close(&r);
+    if (!could_hold_it(buf, size)) { free(buf); return 0; }
     n = fix_pack(buf, size);
-    if (n <= 0) { free(buf); fclose(f); return 0; }
-    if (FSEEK(f, (int64_t)at, SEEK_SET) != 0 || fwrite(buf, 1, size, f) != size) {
-        free(buf); fclose(f);
-        out("   could not write it back into %s\n", dat);
+    if (n <= 0) { free(buf); return 0; }
+    if (!rebuild_dat(dat, ndx_path, x, which, buf, size)) { free(buf); return 0; }
+    free(buf);
+    out("   %s rewritten with the pack changed inside it\n", evo_basename(dat));
+    return n;
+}
+
+/* Patching a packed game.
+ *
+ * A pack inside an archive is squeezed, so it cannot be changed where it lies.
+ * What can be done is what the game's own tools do: read it out, change it,
+ * and write the archive again with the new pack spliced in where the old one
+ * was. The change is four words long and the pack comes out the same size, so
+ * nothing after it moves and only its checksum in the index differs.
+ *
+ * The archive is written beside the original and swapped in only once it is
+ * whole, so a failure part way leaves the game as it was.
+ */
+static int rebuild_dat(const char *dat_path, const char *ndx_path,
+                       Index *x, uint32_t which, uint8_t *pack, uint32_t size)
+{
+    DatReader r;
+    Segment segs[3];
+    size_t nseg = 0;
+    uint64_t at = x->entries[which].offset, endpos = 0;
+    uint32_t i;
+    char tmp_dat[1700], tmp_ndx[1700];
+
+    for (i = 0; i < x->count; i++) {
+        uint64_t e;
+        if (x->entries[i].dat != x->entries[which].dat) continue;
+        e = x->entries[i].offset + (uint64_t)x->entries[i].size;
+        if (e > endpos) endpos = e;
+    }
+    if (dat_open(&r, dat_path) != 0) return 0;
+
+    if (at > 0) {
+        segs[nseg].kind = SEG_DAT; segs[nseg].src = &r;
+        segs[nseg].offset = 0; segs[nseg].size = at; nseg++;
+    }
+    segs[nseg].kind = SEG_MEM; segs[nseg].mem = pack; segs[nseg].size = size; nseg++;
+    if (endpos > at + size) {
+        segs[nseg].kind = SEG_DAT; segs[nseg].src = &r;
+        segs[nseg].offset = at + size; segs[nseg].size = endpos - (at + size); nseg++;
+    }
+
+    snprintf(tmp_dat, sizeof tmp_dat, "%.1600s.new", dat_path);
+    snprintf(tmp_ndx, sizeof tmp_ndx, "%.1600s.new", ndx_path);
+    if (dat_write(tmp_dat, segs, nseg, r.filetime, r.version, r.buffer_size,
+                  r.toc_offset, NULL, NULL) != 0) {
+        dat_close(&r);
+        remove(tmp_dat);
+        out("   could not write the new archive\n");
         return 0;
     }
-    free(buf);
-    if (fclose(f) != 0) { out("   %s did not close cleanly\n", dat); return 0; }
-    return n;
+    dat_close(&r);
+
+    evo_md5(pack, size, x->entries[which].md5);
+    if (ndx_write(x, tmp_ndx) != 0) {
+        remove(tmp_dat); remove(tmp_ndx);
+        out("   could not write the new index\n");
+        return 0;
+    }
+    /* both are whole, so put them in place */
+    remove(dat_path); remove(ndx_path);
+    if (rename(tmp_dat, dat_path) != 0 || rename(tmp_ndx, ndx_path) != 0) {
+        out("   the new files could not be put in place\n");
+        return 0;
+    }
+    return 1;
 }
 
 static void (*g_say)(const char *);
@@ -320,8 +411,10 @@ static int sweep(const char *dir, int depth)
                  * offset from another archive lands somewhere arbitrary here. */
                 if (e->dat != mine) continue;
                 snprintf(loose, sizeof loose, "%.1500s/%.150s", dir, e->name);
-                if (stat(loose, &s2) == 0) continue;
-                got = patch_in_dat(full, e->offset, e->size);
+                /* a loose copy is what the game reads, so it is the one to work
+                 * on, whether that means changing it or putting it back */
+                if (stat(loose, &s2) == 0) { total += patch_loose(loose); continue; }
+                got = patch_in_dat(full, e->offset, e->size, ndxp, &x, k);
                 if (got) {
                     (void)0;
                     total += got;
@@ -344,11 +437,11 @@ static int sweep(const char *dir, int depth)
                 Entry *e = &x.entries[i];
                 if (!ends_with(e->name, ".rpk")) continue;
                 snprintf(loose, sizeof loose, "%s/%s", dir, e->name);
-                if (stat(loose, &s2) == 0) continue;
+                if (stat(loose, &s2) == 0) { total += patch_loose(loose); continue; }
                 snprintf(datp, sizeof datp, "%s/game%03u.dat", dir, e->dat);
                 if (stat(datp, &s2) != 0) continue;
                 {
-                    int n = patch_in_dat(datp, e->offset, e->size);
+                    int n = patch_in_dat(datp, e->offset, e->size, full, &x, i);
                     if (n > 0) {
                         (void)0;
                         total += n;
@@ -369,7 +462,7 @@ int dcfix_sweep(const char *path, void (*say)(const char *))
     g_already = 0;
     if (stat(path, &st) == 0 && S_ISREG(st.st_mode)) {
         if (ends_with(path, ".dat")) {
-            char ndx[1600], *cut;
+            char ndx[1600], ndxfull[1700], *cut;
             Index x;
             uint32_t i;
             int total = 0;
@@ -379,10 +472,9 @@ int dcfix_sweep(const char *path, void (*say)(const char *))
             { char *c2 = strrchr(ndx, '\\'); if (c2 > cut) cut = c2; }
 #endif
             if (cut) *cut = 0; else snprintf(ndx, sizeof ndx, ".");
+            snprintf(ndxfull, sizeof ndxfull, "%.1500s/game.ndx", ndx);
             {
-                char full[1700];
-                snprintf(full, sizeof full, "%.1500s/game.ndx", ndx);
-                if (ndx_open(&x, full) != 0) {
+                if (ndx_open(&x, ndxfull) != 0) {
                     out("  no game.ndx beside that archive, so there is no way to\n"
                         "  tell where anything in it starts\n");
                     return 0;
@@ -391,7 +483,7 @@ int dcfix_sweep(const char *path, void (*say)(const char *))
             for (i = 0; i < x.count; i++) {
                 Entry *e = &x.entries[i];
                 if (!ends_with(e->name, ".rpk")) continue;
-                total += patch_in_dat(path, e->offset, e->size);
+                total += patch_in_dat(path, e->offset, e->size, ndxfull, &x, i);
                 if (total) { (void)(
                                  evo_basename(path)); break; }
             }
