@@ -52,6 +52,8 @@ jobs:
           gcc -O2 -std=gnu99 -Wall -Wextra -Werror -DDCFIX_NO_MAIN \
             -o "DC Res Patch Depth Fix.exe" dcdepthfix.c dcgui.c evofs.c app.res.o \
             -mwindows -lcomctl32 -lcomdlg32 -lole32 -lshell32 -static -s
+          # a window cannot be checked from a script, so the same code is also
+          # built without one. it is used by the next step and not shipped.
           gcc -O2 -std=gnu99 -Wall -Wextra -Werror \
             -o "DC Res Patch Depth Fix (console).exe" dcdepthfix.c evofs.c app.res.o \
             -static -s
@@ -67,8 +69,6 @@ jobs:
         run: |
           mkdir upload
           mv "DC Res Patch Depth Fix.exe" upload
-          mv "DC Res Patch Depth Fix (console).exe" upload
-          cp README.md upload
 
       - uses: actions/upload-artifact@v7
         with:
@@ -89,6 +89,8 @@ jobs:
           cc -O2 -std=gnu99 -Wall -Wextra -DDCFIX_NO_MAIN \
             -o DC-Res-Patch-Depth-Fix dcgtk.c dcdepthfix.c evofs.c \
             $(pkg-config --cflags --libs gtk+-3.0)
+          # a window cannot be checked from a script, so the same code is also
+          # built without one. it is used by the next step and not shipped.
           cc -O2 -std=gnu99 -Wall -Wextra -Werror \
             -o DC-Res-Patch-Depth-Fix-terminal dcdepthfix.c evofs.c
 
@@ -109,8 +111,6 @@ jobs:
                        -d "$APP/Contents/libs" -p @executable_path/../libs
           mkdir upload
           mv "$APP" upload
-          mv DC-Res-Patch-Depth-Fix-terminal upload
-          cp README.md upload
 
       - uses: actions/upload-artifact@v7
         with:
@@ -131,6 +131,8 @@ jobs:
           cc -O2 -std=gnu99 -Wall -Wextra -Werror -DDCFIX_NO_MAIN \
             -o DC-Res-Patch-Depth-Fix dcgtk.c dcdepthfix.c evofs.c \
             $(pkg-config --cflags --libs gtk+-3.0) -lm
+          # a window cannot be checked from a script, so the same code is also
+          # built without one. it is used by the next step and not shipped.
           cc -O2 -std=gnu99 -Wall -Wextra -Werror \
             -o DC-Res-Patch-Depth-Fix-terminal dcdepthfix.c evofs.c -lm
 
@@ -158,8 +160,6 @@ jobs:
         run: |
           mkdir upload
           mv DC-Res-Patch-Depth-Fix.AppImage upload
-          mv DC-Res-Patch-Depth-Fix-terminal upload
-          cp README.md upload
 
       - uses: actions/upload-artifact@v7
         with:
