@@ -261,6 +261,20 @@ static int patch_loose(const char *path)
  * The game reads a loose file before it looks in an archive, so the pack is
  * taken out, changed, and written beside the archives under its own name. That
  * is what a mod does, and it is undone by deleting the file. */
+/* Where the shader has always been.
+ *
+ * The index lists thousands of packs and each one has to be unsqueezed before
+ * it can be looked at, so going through them in order means unpacking the whole
+ * game. The one that holds the depth pass is global.rpk, so that is tried
+ * first; if it is not there the rest are still tried, just afterwards.
+ */
+static int likely_pack(const char *name)
+{
+    const char *slash = strrchr(name, '/');
+    const char *leaf = slash ? slash + 1 : name;
+    return !_stricmp_(leaf, "global.rpk");
+}
+
 static int rebuild_dat(const char *dat_path, const char *ndx_path,
                        Index *x, uint32_t which, uint8_t *pack, uint32_t size);
 
@@ -397,27 +411,32 @@ static int sweep(const char *dir, int depth)
             uint32_t k;
             char ndxp[1700];
             unsigned mine;
+            struct stat s3;
             if (sscanf(de->d_name, "game%u.dat", &mine) != 1) continue;
             snprintf(ndxp, sizeof ndxp, "%.1500s/game.ndx", dir);
+            /* the index says which archive holds what, so once it has been
+             * read there is no reason to read it again for every archive
+             * beside it. that pass is left to the index itself. */
+            if (stat(ndxp, &s3) == 0) continue;
             if (ndx_open(&x, ndxp) != 0) continue;
-            for (k = 0; k < x.count; k++) {
-                Entry *e = &x.entries[k];
-                char loose[1700];
-                struct stat s2;
-                int got;
-                if (!ends_with(e->name, ".rpk")) continue;
-                /* the index covers every archive, so only the entries that
-                 * belong to this one may be written into it. without this an
-                 * offset from another archive lands somewhere arbitrary here. */
-                if (e->dat != mine) continue;
-                snprintf(loose, sizeof loose, "%.1500s/%.150s", dir, e->name);
-                /* a loose copy is what the game reads, so it is the one to work
-                 * on, whether that means changing it or putting it back */
-                if (stat(loose, &s2) == 0) { total += patch_loose(loose); continue; }
-                got = patch_in_dat(full, e->offset, e->size, ndxp, &x, k);
-                if (got) {
-                    (void)0;
-                    total += got;
+            {   /* the likely one, then the rest; stop as soon as it is found */
+                int pass;
+                for (pass = 0; pass < 2 && !total && !g_already; pass++)
+                for (k = 0; k < x.count && !total && !g_already; k++) {
+                    Entry *e = &x.entries[k];
+                    char loose[1700];
+                    struct stat s2;
+                    if (!ends_with(e->name, ".rpk")) continue;
+                    if (likely_pack(e->name) != (pass == 0)) continue;
+                    /* the index covers every archive, so only the entries that
+                     * belong to this one may be written into it. without this an
+                     * offset from another archive lands somewhere arbitrary. */
+                    if (e->dat != mine) continue;
+                    snprintf(loose, sizeof loose, "%.1500s/%.150s", dir, e->name);
+                    /* a loose copy is what the game reads, so it is the one to
+                     * work on, whether that means changing it or putting it back */
+                    if (stat(loose, &s2) == 0) { total += patch_loose(loose); continue; }
+                    total += patch_in_dat(full, e->offset, e->size, ndxp, &x, k);
                 }
             }
             ndx_close(&x);
@@ -431,11 +450,15 @@ static int sweep(const char *dir, int depth)
             Index x;
             uint32_t i;
             if (ndx_open(&x, full) != 0) continue;
-            for (i = 0; i < x.count; i++) {
+            {
+              int pass;
+              for (pass = 0; pass < 2 && !total && !g_already; pass++)
+              for (i = 0; i < x.count && !total && !g_already; i++) {
                 char datp[1600], loose[1600];
                 struct stat s2;
                 Entry *e = &x.entries[i];
                 if (!ends_with(e->name, ".rpk")) continue;
+                if (likely_pack(e->name) != (pass == 0)) continue;
                 snprintf(loose, sizeof loose, "%s/%s", dir, e->name);
                 if (stat(loose, &s2) == 0) { total += patch_loose(loose); continue; }
                 snprintf(datp, sizeof datp, "%s/game%03u.dat", dir, e->dat);
@@ -448,6 +471,7 @@ static int sweep(const char *dir, int depth)
                     }
                 }
             }
+              }
             ndx_close(&x);
         }
     }
