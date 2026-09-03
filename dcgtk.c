@@ -4,9 +4,10 @@
 #include <string.h>
 
 int dcfix_sweep(const char *dir, void (*say)(const char *));
+int dcfix_undo(const char *dir, void (*say)(const char *));
 int dcfix_already(void);
 
-static GtkWidget *g_view, *g_pick, *g_go;
+static GtkWidget *g_view, *g_pick, *g_go, *g_back;
 static GtkTextBuffer *g_buf;
 static char g_dir[2048];
 
@@ -41,25 +42,28 @@ static void on_pick(GtkWidget *w, gpointer data)
             g_free(p);
             gtk_button_set_label(GTK_BUTTON(g_pick), g_dir);
             gtk_widget_set_sensitive(g_go, TRUE);
+            gtk_widget_set_sensitive(g_back, TRUE);
             clear();
-            put("Ready. Press Patch.\n");
+            put("Now press Apply the fix.\n");
         }
     }
     gtk_widget_destroy(dlg);
 }
 
-static void on_go(GtkWidget *w, gpointer data)
+static void run_it(int undoing)
 {
     int n;
-    (void)w; (void)data;
     if (!g_dir[0]) return;
     clear();
     gtk_widget_set_sensitive(g_go, FALSE);
+    gtk_widget_set_sensitive(g_back, FALSE);
     gtk_widget_set_sensitive(g_pick, FALSE);
-    n = dcfix_sweep(g_dir, say);
+    n = undoing ? dcfix_undo(g_dir, say) : dcfix_sweep(g_dir, say);
     if (n > 0) {
-        put("\nPATCHED SUCCESSFULLY!\n");
+        put(undoing ? "\nREVERTED!\n" : "\nPATCHED SUCCESSFULLY!\n");
         put("Delete the shader cache before you play.\n");
+    } else if (undoing) {
+        put("\nNOTHING TO REVERT!\n");
     } else if (dcfix_already()) {
         put("\nALREADY PATCHED!\n");
     } else {
@@ -67,7 +71,20 @@ static void on_go(GtkWidget *w, gpointer data)
         put("the one holding global.rpk.\n");
     }
     gtk_widget_set_sensitive(g_go, TRUE);
+    gtk_widget_set_sensitive(g_back, TRUE);
     gtk_widget_set_sensitive(g_pick, TRUE);
+}
+
+static void on_go(GtkWidget *w, gpointer data)
+{
+    (void)w; (void)data;
+    run_it(0);
+}
+
+static void on_back(GtkWidget *w, gpointer data)
+{
+    (void)w; (void)data;
+    run_it(1);
 }
 
 int main(int argc, char **argv)
@@ -89,10 +106,18 @@ int main(int argc, char **argv)
     g_signal_connect(g_pick, "clicked", G_CALLBACK(on_pick), NULL);
     gtk_box_pack_start(GTK_BOX(box), g_pick, FALSE, FALSE, 0);
 
-    g_go = gtk_button_new_with_label("Patch");
-    gtk_widget_set_sensitive(g_go, FALSE);
-    g_signal_connect(g_go, "clicked", G_CALLBACK(on_go), NULL);
-    gtk_box_pack_start(GTK_BOX(box), g_go, FALSE, FALSE, 0);
+    {
+        GtkWidget *row = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 8);
+        g_go = gtk_button_new_with_label("Apply the fix");
+        gtk_widget_set_sensitive(g_go, FALSE);
+        g_signal_connect(g_go, "clicked", G_CALLBACK(on_go), NULL);
+        gtk_box_pack_start(GTK_BOX(row), g_go, TRUE, TRUE, 0);
+        g_back = gtk_button_new_with_label("Revert");
+        gtk_widget_set_sensitive(g_back, FALSE);
+        g_signal_connect(g_back, "clicked", G_CALLBACK(on_back), NULL);
+        gtk_box_pack_start(GTK_BOX(row), g_back, FALSE, FALSE, 0);
+        gtk_box_pack_start(GTK_BOX(box), row, FALSE, FALSE, 0);
+    }
 
     scroll = gtk_scrolled_window_new(NULL, NULL);
     gtk_widget_set_vexpand(scroll, TRUE);
@@ -105,14 +130,13 @@ int main(int argc, char **argv)
     gtk_container_add(GTK_CONTAINER(scroll), g_view);
     gtk_box_pack_start(GTK_BOX(box), scroll, TRUE, TRUE, 0);
 
-    put("The game tests depth against a fixed 960 x 540, which is wrong at\n");
-    put("any other resolution and drops parts of the scene.\n\n");
-    put("Pick your game's patch folder, the one holding global.rpk.\n");
+    put("Press Select game patch folder, then press Apply the fix.\n");
 
     if (argc > 1) {
         g_strlcpy(g_dir, argv[1], sizeof g_dir);
         gtk_button_set_label(GTK_BUTTON(g_pick), g_dir);
         gtk_widget_set_sensitive(g_go, TRUE);
+        gtk_widget_set_sensitive(g_back, TRUE);
     }
 
     gtk_widget_show_all(win);

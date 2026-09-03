@@ -14,11 +14,13 @@
 #define ID_FIX   101
 #define ID_LOG   102
 #define ID_PATH  103
+#define ID_UNDO  104
 
 int dcfix_sweep(const char *dir, void (*say)(const char *));
+int dcfix_undo(const char *dir, void (*say)(const char *));
 int dcfix_already(void);
 
-static HWND g_main, g_log, g_path, g_fix;
+static HWND g_main, g_log, g_path, g_fix, g_undo;
 static char g_dir[MAX_PATH];
 static HFONT g_font;
 
@@ -83,7 +85,11 @@ static void layout(void)
     GetClientRect(g_main, &r);
     MoveWindow(GetDlgItem(g_main, ID_PICK), 10, 8, 250, 26, TRUE);
     MoveWindow(g_path, 10, 38, r.right - 20, 16, TRUE);
-    MoveWindow(g_fix, 10, 58, r.right - 20, 28, TRUE);
+    {   /* the two side by side, the fix given the wider half */
+        int w2 = (r.right - 24) * 2 / 3;
+        MoveWindow(g_fix, 10, 58, w2, 28, TRUE);
+        MoveWindow(g_undo, 14 + w2, 58, r.right - 24 - w2, 28, TRUE);
+    }
     MoveWindow(g_log, 10, 92, r.right - 20, r.bottom - 102, TRUE);
 }
 
@@ -102,24 +108,31 @@ static LRESULT CALLBACK proc(HWND h, UINT m, WPARAM w, LPARAM l)
             if (pick_folder(g_dir, sizeof g_dir)) {
                 SetWindowTextA(g_path, g_dir);
                 EnableWindow(g_fix, TRUE);
+                EnableWindow(g_undo, TRUE);
             }
             return 0;
         }
-        if (LOWORD(w) == ID_FIX) {
-            int n;
+        if (LOWORD(w) == ID_FIX || LOWORD(w) == ID_UNDO) {
+            int undoing = LOWORD(w) == ID_UNDO, n;
             SetWindowTextA(g_log, "");
             sayf("%s\r\n", g_dir);
             EnableWindow(g_fix, FALSE);
-            n = dcfix_sweep(g_dir, say);
+            EnableWindow(g_undo, FALSE);
+            n = undoing ? dcfix_undo(g_dir, say) : dcfix_sweep(g_dir, say);
             if (n > 0)
-                sayf("%d shader(s) changed. Delete the shader cache before you "
-                     "play.\r\n", n);
+                say(undoing
+                    ? "REVERTED! Delete the shader cache before you play.\r\n"
+                    : "PATCHED SUCCESSFULLY! Delete the shader cache before you "
+                      "play.\r\n");
+            else if (undoing)
+                say("NOTHING TO REVERT!\r\n");
             else if (dcfix_already())
-                say("Already fixed, nothing to do.\r\n");
+                say("ALREADY PATCHED!\r\n");
             else
-                say("No depth pass in there. Pick the folder your game update "
-                    "installed.\r\n");
+                say("NOTHING TO PATCH! Point it at your game patch folder, the "
+                    "one holding global.rpk.\r\n");
             EnableWindow(g_fix, TRUE);
+            EnableWindow(g_undo, TRUE);
             return 0;
         }
         return 0;
@@ -132,7 +145,7 @@ int WINAPI WinMain(HINSTANCE inst, HINSTANCE prev, LPSTR cmd, int show)
 {
     WNDCLASSA wc;
     MSG msg;
-    HWND kids[4];
+    HWND kids[5];
     int i;
     (void)prev; (void)cmd;
     InitCommonControls();
@@ -162,18 +175,18 @@ int WINAPI WinMain(HINSTANCE inst, HINSTANCE prev, LPSTR cmd, int show)
     g_fix = CreateWindowA("BUTTON", "Apply the fix",
                           WS_CHILD | WS_VISIBLE | WS_DISABLED,
                           0, 0, 0, 0, g_main, (HMENU)ID_FIX, inst, NULL);
+    g_undo = CreateWindowA("BUTTON", "Revert",
+                           WS_CHILD | WS_VISIBLE | WS_DISABLED,
+                           0, 0, 0, 0, g_main, (HMENU)ID_UNDO, inst, NULL);
     g_log = CreateWindowExA(WS_EX_CLIENTEDGE, "EDIT", "",
                             WS_CHILD | WS_VISIBLE | WS_VSCROLL | ES_MULTILINE |
                             ES_READONLY | ES_AUTOVSCROLL,
                             0, 0, 0, 0, g_main, (HMENU)ID_LOG, inst, NULL);
-    kids[1] = g_path; kids[2] = g_fix; kids[3] = g_log;
-    for (i = 0; i < 4; i++) SendMessageA(kids[i], WM_SETFONT, (WPARAM)g_font, TRUE);
+    kids[1] = g_path; kids[2] = g_fix; kids[3] = g_undo; kids[4] = g_log;
+    for (i = 0; i < 5; i++) SendMessageA(kids[i], WM_SETFONT, (WPARAM)g_font, TRUE);
     layout();
     ShowWindow(g_main, show);
-    say("Pick your game's patch folder and press the button.\r\n\r\n"
-        "The pass that builds the half resolution depth buffer covers only 960 "
-        "by 540 of it, which is right at 1080p and leaves the rest stale above "
-        "that.\r\n");
+    say("Press Select game patch folder, then press Apply the fix.\r\n");
     while (GetMessage(&msg, NULL, 0, 0) > 0) {
         TranslateMessage(&msg);
         DispatchMessage(&msg);

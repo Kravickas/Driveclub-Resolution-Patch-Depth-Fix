@@ -26,14 +26,16 @@ static void out(const char *fmt, ...);
 /* what the shader had before it was changed, so the line that names the... */
 static unsigned g_was_w, g_was_h;
 
-/* say what is in there, not only whether something is */
-static int g_verbose;
-
 /* the edges did not come out right, so the shader is not usable */
 static int g_edges_bad;
+
+/* set while undoing, so the same walk puts the old words back instead */
+static int g_undo;
+static int g_undone;
 static int g_already;
 int dcfix_already(void);
 int dcfix_sweep(const char *dir, void (*say)(const char *));
+int dcfix_undo(const char *dir, void (*say)(const char *));
 
 uint8_t *slurp_pub(const char *path, size_t *len)
 {
@@ -106,7 +108,9 @@ static int fix_pack(uint8_t *buf, size_t len)
                 break;
             }
             if (!found) continue;
-            for (o = 0; o + 28 <= sz; o++) {
+            /* undoing goes straight to the block below; patching here first
+             * would write the very words that block then takes back out */
+            for (o = 0; !g_undo && o + 28 <= sz; o++) {
                 uint32_t a = rd32(p + o), b = rd32(p + o + 8);
                 uint32_t la, lb, wx, wy;
                 int k, hit = 0;
@@ -139,27 +143,56 @@ static int fix_pack(uint8_t *buf, size_t len)
                 done++;
                 break;
             }
+            /* Undoing it: the extracts go back to the two constants the game
+             * shipped, and the comparisons back to the narrower ones. */
+            if (g_undo) {
+                for (o = 0; o + 16 <= sz; o++) {
+                    uint32_t a = rd32(p + o), b, wx, wy;
+                    int k, hit = 0;
+                    if ((a >> 30) != 2 || ((a >> 23) & 0x7F) != 41) continue;
+                    if (((a >> 8) & 0xFF) != 0xFF) continue;
+                    if (rd32(p + o + 4) != 0x000E0000u) continue;
+                    b = rd32(p + o + 8);
+                    if ((b >> 30) != 2 || ((b >> 23) & 0x7F) != 41) continue;
+                    if (rd32(p + o + 12) != 0x000E000Eu) continue;
+                    wx = (a >> 16) & 0x7F;
+                    wy = (b >> 16) & 0x7F;
+                    for (k = 0; k < 12 && o + 16 + (size_t)k * 4 + 8 <= sz; k++) {
+                        size_t at = o + 16 + (size_t)k * 4;
+                        uint32_t c = rd32(p + at);
+                        if ((c >> 25) == 0x3E && ((c >> 17) & 0xFF) == 0xC6 &&
+                            ((c & 0x1FF) == wx || (c & 0x1FF) == wy)) {
+                            wr32(p + at, c - (2u << 17)); hit++;
+                        } else if ((c >> 26) == 0x34 && ((c >> 17) & 0x1FF) == 0xC6) {
+                            uint32_t s0 = rd32(p + at + 4) & 0x1FF;
+                            if (s0 == wx || s0 == wy) { wr32(p + at, c - (2u << 17)); hit++; }
+                        }
+                    }
+                    if (hit != 2) continue;
+                    wr32(p + o, (0x17Du << 23) | (wx << 16) | (3u << 8) | 0xFFu);
+                    wr32(p + o + 4, 960);
+                    wr32(p + o + 8, (0x17Du << 23) | (wy << 16) | (3u << 8) | 0xFFu);
+                    wr32(p + o + 12, 540);
+                    g_undone++;
+                    done++;
+                    break;
+                }
+                if (done) continue;
+            }
             /* Already done, and worth saying what is in there rather than only that... */
             for (o = 0; o + 8 <= sz && !done; o++) {
                 uint32_t w = rd32(p + o);
                 if ((w >> 30) == 2 && ((w >> 23) & 0x7F) == 41 &&
                     ((w >> 8) & 0xFF) == 0xFF && rd32(p + o + 4) == 0x000E0000u) {
                     g_already++;
-                    if (g_verbose) {
-                        uint32_t wx = (w >> 16) & 0x7F, wy = 0;
+                    {   /* half a patch is worse than none, so the comparisons
+                         * are counted every time rather than only when asked */
                         int k, ge = 0;
-                        if (o + 12 <= sz) {
-                            uint32_t h = rd32(p + o + 8);
-                            if ((h >> 30) == 2 && ((h >> 23) & 0x7F) == 41)
-                                wy = (h >> 16) & 0x7F;
-                        }
-                        (void)wx; (void)wy;
                         for (k = 0; k < 16 && o + 16 + (size_t)k * 4 + 4 <= sz; k++) {
                             uint32_t c = rd32(p + o + 16 + (size_t)k * 4);
                             if ((c >> 25) == 0x3E && ((c >> 17) & 0xFF) == 0xC6) ge++;
                             else if ((c >> 26) == 0x34 && ((c >> 17) & 0x1FF) == 0xC6) ge++;
                         }
-                        (void)0;
                         if (ge != 2) g_edges_bad = 1;
                     }
                     break;
@@ -272,6 +305,8 @@ static int sweep(const char *dir, int depth)
             Index x;
             uint32_t k;
             char ndxp[1700];
+            unsigned mine;
+            if (sscanf(de->d_name, "game%u.dat", &mine) != 1) continue;
             snprintf(ndxp, sizeof ndxp, "%.1500s/game.ndx", dir);
             if (ndx_open(&x, ndxp) != 0) continue;
             for (k = 0; k < x.count; k++) {
@@ -280,6 +315,10 @@ static int sweep(const char *dir, int depth)
                 struct stat s2;
                 int got;
                 if (!ends_with(e->name, ".rpk")) continue;
+                /* the index covers every archive, so only the entries that
+                 * belong to this one may be written into it. without this an
+                 * offset from another archive lands somewhere arbitrary here. */
+                if (e->dat != mine) continue;
                 snprintf(loose, sizeof loose, "%.1500s/%.150s", dir, e->name);
                 if (stat(loose, &s2) == 0) continue;
                 got = patch_in_dat(full, e->offset, e->size);
@@ -366,14 +405,32 @@ int dcfix_sweep(const char *path, void (*say)(const char *))
 
 int dcfix_already(void) { return g_already; }
 
+/* the same sweep, putting the game's own words back */
+int dcfix_undo(const char *path, void (*say)(const char *))
+{
+    int n;
+    g_undo = 1;
+    g_undone = 0;
+    n = dcfix_sweep(path, say);
+    g_undo = 0;
+    return n;
+}
+
 #ifndef DCFIX_NO_MAIN
 int main(int argc, char **argv)
 {
     const char *dir = argc >= 2 ? argv[1] : ".";
     int n;
 
-    if (argc > 2 && (!strcmp(argv[2], "-v") || !strcmp(argv[2], "--check")))
-        g_verbose = 1;
+    if (argc > 2 && (!strcmp(argv[2], "-u") || !strcmp(argv[2], "--undo"))) {
+        printf("DC Res Patch Depth Fix\n\n");
+        if (dcfix_undo(dir, NULL) > 0) {
+            printf("  REVERTED! Delete the shader cache before you play.\n");
+            return 0;
+        }
+        printf("  NOTHING TO REVERT!\n");
+        return 1;
+    }
     printf("DC Res Patch Depth Fix\n\n");
     n = dcfix_sweep(dir, NULL);
     if (!n) {
