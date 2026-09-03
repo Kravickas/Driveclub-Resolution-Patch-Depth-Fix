@@ -9,4 +9,8 @@ the real size instead.
 Linux gets an AppImage, macOS an app with its libraries inside. Neither needs
 anything installed.
 
+If a shell script here ever loses its executable bit in git, put it back with
+
+    git update-index --chmod=+x .github/workflows/scripts/linux-appimage.sh
+
 Format research: Nenkai (DriveClubFS, MIT), RokkuDayo.
