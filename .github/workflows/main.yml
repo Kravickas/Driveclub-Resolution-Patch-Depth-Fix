@@ -1,0 +1,200 @@
+name: Build and Release
+
+on:
+  push:
+    paths-ignore:
+      - "**/*.md"
+  pull_request:
+    paths-ignore:
+      - "**/*.md"
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.event_name }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'push' }}
+
+permissions:
+  contents: write
+
+jobs:
+
+  get-info:
+    runs-on: ubuntu-24.04
+    outputs:
+      date: ${{ steps.vars.outputs.date }}
+      shorthash: ${{ steps.vars.outputs.shorthash }}
+    steps:
+      - uses: actions/checkout@v6
+      - name: Get date and git hash
+        id: vars
+        run: |
+          echo "date=$(date +'%Y-%m-%d')" >> $GITHUB_OUTPUT
+          echo "shorthash=$(git rev-parse --short HEAD)" >> $GITHUB_OUTPUT
+
+  windows:
+    runs-on: windows-latest
+    needs: get-info
+    defaults:
+      run:
+        shell: msys2 {0}
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: msys2/setup-msys2@v2
+        with:
+          msystem: MINGW64
+          update: true
+          install: mingw-w64-x86_64-gcc mingw-w64-x86_64-binutils
+
+      - name: Build
+        run: |
+          windres app.rc app.res.o
+          gcc -O2 -std=gnu99 -Wall -Wextra -Werror -DDCFIX_NO_MAIN \
+            -o "DC Res Patch Depth Fix.exe" dcdepthfix.c dcgui.c evofs.c app.res.o \
+            -mwindows -lcomctl32 -lcomdlg32 -lole32 -lshell32 -static -s
+          gcc -O2 -std=gnu99 -Wall -Wextra -Werror \
+            -o "DC Res Patch Depth Fix (console).exe" dcdepthfix.c evofs.c app.res.o \
+            -static -s
+
+      - name: Check it answers
+        run: |
+          mkdir -p empty
+          "./DC Res Patch Depth Fix (console).exe" empty > out.txt 2>&1 || true
+          cat out.txt
+          grep -q "NOTHING TO PATCH" out.txt
+
+      - name: Package
+        run: |
+          mkdir upload
+          mv "DC Res Patch Depth Fix.exe" upload
+          mv "DC Res Patch Depth Fix (console).exe" upload
+          cp README.md upload
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: dcfix-win64-${{ needs.get-info.outputs.date }}-${{ needs.get-info.outputs.shorthash }}
+          path: upload/
+
+  macos:
+    runs-on: macos-26
+    needs: get-info
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Install Build Dependencies
+        run: brew install gtk+3 pkg-config dylibbundler
+
+      - name: Build
+        run: |
+          cc -O2 -std=gnu99 -Wall -Wextra -DDCFIX_NO_MAIN \
+            -o DC-Res-Patch-Depth-Fix dcgtk.c dcdepthfix.c evofs.c \
+            $(pkg-config --cflags --libs gtk+-3.0)
+          cc -O2 -std=gnu99 -Wall -Wextra -Werror \
+            -o DC-Res-Patch-Depth-Fix-terminal dcdepthfix.c evofs.c
+
+      - name: Check it answers
+        run: |
+          mkdir -p empty
+          ./DC-Res-Patch-Depth-Fix-terminal empty > out.txt 2>&1 || true
+          cat out.txt
+          grep -q "NOTHING TO PATCH" out.txt
+
+      - name: Package and Upload macOS artifact
+        run: |
+          APP="DC Res Patch Depth Fix.app"
+          mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
+          cp DC-Res-Patch-Depth-Fix "$APP/Contents/MacOS/dcfix-gui"
+          cp packaging/macos/Info.plist "$APP/Contents/"
+          dylibbundler -od -b -x "$APP/Contents/MacOS/dcfix-gui" \
+                       -d "$APP/Contents/libs" -p @executable_path/../libs
+          mkdir upload
+          mv "$APP" upload
+          mv DC-Res-Patch-Depth-Fix-terminal upload
+          cp README.md upload
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: dcfix-macos-${{ needs.get-info.outputs.date }}-${{ needs.get-info.outputs.shorthash }}
+          path: upload/
+
+  linux:
+    runs-on: ubuntu-24.04
+    needs: get-info
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Install dependencies
+        run: sudo apt-get update && sudo apt-get install -y libgtk-3-dev pkg-config libfuse2 file desktop-file-utils xvfb
+
+      - name: Build
+        run: |
+          cc -O2 -std=gnu99 -Wall -Wextra -Werror -DDCFIX_NO_MAIN \
+            -o DC-Res-Patch-Depth-Fix dcgtk.c dcdepthfix.c evofs.c \
+            $(pkg-config --cflags --libs gtk+-3.0) -lm
+          cc -O2 -std=gnu99 -Wall -Wextra -Werror \
+            -o DC-Res-Patch-Depth-Fix-terminal dcdepthfix.c evofs.c -lm
+
+      - name: Static analysis
+        run: cc -O1 -std=gnu99 -fanalyzer -c dcdepthfix.c evofs.c
+
+      - name: Check it answers
+        run: |
+          mkdir -p empty
+          ./DC-Res-Patch-Depth-Fix-terminal empty > out.txt 2>&1 || true
+          cat out.txt
+          grep -q "NOTHING TO PATCH" out.txt
+
+      - name: Check the window opens
+        run: |
+          timeout 20 xvfb-run -a ./DC-Res-Patch-Depth-Fix &
+          sleep 8
+          pgrep -f DC-Res-Patch-Depth-Fix > /dev/null
+          pkill -f DC-Res-Patch-Depth-Fix || true
+
+      - name: Run AppImage packaging script
+        run: ./.github/workflows/scripts/linux-appimage.sh
+
+      - name: Package and Upload Linux artifact
+        run: |
+          mkdir upload
+          mv DC-Res-Patch-Depth-Fix.AppImage upload
+          mv DC-Res-Patch-Depth-Fix-terminal upload
+          cp README.md upload
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: dcfix-linux-${{ needs.get-info.outputs.date }}-${{ needs.get-info.outputs.shorthash }}
+          path: upload/
+
+  release:
+    needs: [ get-info, windows, macos, linux ]
+    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download all artifacts
+        uses: actions/download-artifact@v8
+        with:
+          path: ./artifacts
+
+      - name: Make artifacts executable
+        run: |
+          chmod -R a+x ./artifacts/dcfix-linux-* || true
+          chmod -R a+x ./artifacts/dcfix-macos-* || true
+
+      - name: Compress individual directories (without parent directory)
+        run: |
+          cd ./artifacts
+          for dir in */; do
+            if [ -d "$dir" ]; then
+              dir_name=${dir%/}
+              (cd "$dir_name" && zip -r "../${dir_name}.zip" .)
+            fi
+          done
+
+      - uses: ncipollo/release-action@v1
+        with:
+          name: "DC-Res-Patch-Depth-Fix-${{ needs.get-info.outputs.date }}-${{ needs.get-info.outputs.shorthash }}"
+          tag: "${{ needs.get-info.outputs.date }}-${{ needs.get-info.outputs.shorthash }}"
+          draft: false
+          prerelease: true
+          artifacts: ./artifacts/*.zip
